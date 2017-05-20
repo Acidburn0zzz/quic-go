@@ -8,7 +8,6 @@ import (
 	"io"
 	"net"
 	"sync"
-	"time"
 
 	"github.com/lucas-clemente/quic-go/crypto"
 	"github.com/lucas-clemente/quic-go/protocol"
@@ -32,6 +31,8 @@ type cryptoSetupServer struct {
 
 	version           protocol.VersionNumber
 	supportedVersions []protocol.VersionNumber
+
+	verifySourceAddress func(net.Addr, *STK) bool
 
 	nullAEAD                    crypto.AEAD
 	secureAEAD                  crypto.AEAD
@@ -67,6 +68,7 @@ func NewCryptoSetup(
 	cryptoStream io.ReadWriter,
 	connectionParametersManager ConnectionParametersManager,
 	supportedVersions []protocol.VersionNumber,
+	verifySourceAddress func(net.Addr, *STK) bool,
 	aeadChanged chan<- protocol.EncryptionLevel,
 ) (CryptoSetup, error) {
 	stkGenerator, err := NewSTKGenerator()
@@ -86,6 +88,7 @@ func NewCryptoSetup(
 		nullAEAD:             crypto.NewNullAEAD(protocol.PerspectiveServer, version),
 		cryptoStream:         cryptoStream,
 		connectionParameters: connectionParametersManager,
+		verifySourceAddress:  verifySourceAddress,
 		aeadChanged:          aeadChanged,
 	}, nil
 }
@@ -272,19 +275,16 @@ func (h *cryptoSetupServer) isInchoateCHLO(cryptoData map[Tag][]byte, cert []byt
 	if crypto.HashCert(cert) != xlct {
 		return true
 	}
-	return !h.verifySTK(cryptoData[TagSTK])
+	return h.verifySTK(cryptoData[TagSTK])
 }
 
-func (h *cryptoSetupServer) verifySTK(stk []byte) bool {
-	stkTime, err := h.stkGenerator.VerifyToken(h.remoteAddr, stk)
+func (h *cryptoSetupServer) verifySTK(token []byte) bool {
+	stk, err := h.stkGenerator.DecodeToken(token)
 	if err != nil {
 		utils.Debugf("STK invalid: %s", err.Error())
-		return false
+		return true
 	}
-	if time.Now().After(stkTime.Add(protocol.STKExpiryTime)) {
-		return false
-	}
-	return true
+	return h.verifySourceAddress(h.remoteAddr, stk)
 }
 
 func (h *cryptoSetupServer) handleInchoateCHLO(sni string, chlo []byte, cryptoData map[Tag][]byte) ([]byte, error) {
